@@ -190,57 +190,61 @@ func CreateAuth(email string, td *TokenDetails) error {
 }
 
 // 유저 토큰 인증 및 액세스 토큰 재발급
-func userAuth(w http.ResponseWriter, r *http.Request) {
+func accessAuth(w http.ResponseWriter, r *http.Request) {
 	cors(w)
 
 	// 액세스 토큰 검증
 	err := TokenValid(r.FormValue("access_token"), r, "access")
 	if err != nil {
 		// 액세스 토큰이 만료된 경우
-
-		// 리프레쉬 토큰도 만료되었는지 확인
-		err = TokenValid(r.FormValue("refresh_token"), r, "refresh")
-		if err != nil {
-			// 리프레쉬 토큰도 만료된 경우 -> 재 로그인 필요
-			fmt.Println(err)
-			rd.JSON(w, http.StatusOK, "you need to login")
-		} else {
-			// 리프레쉬 토큰은 살아있는 경우 -> 액세스 토큰 재발급
-			fmt.Println("액세스 토큰이 재발급 됩니다.")
-			// 리프레쉬 토큰에서 이메일 및 uuid 추출
-			ad, err := ExtractTokenMetadata(r.FormValue("refresh_token"), r, "refresh")
-			if err != nil {
-				fmt.Println(err)
-			}
-			// 추출된 uuid로 redis에서 이메일 가져와서 토큰의 이메일과 비교
-			emailFromRedis, err := FetchAuth(ad)
-			if err != nil {
-				fmt.Println(err)
-			}
-
-			if ad.email == emailFromRedis {
-				// 같다면 액세스 토큰 재발급
-				td, err := CreatAccessToken(emailFromRedis)
-				if err != nil {
-					fmt.Println(err)
-				}
-				// 액세스 토큰 redis에 저장
-				err = SaveAccessToken(emailFromRedis, td)
-				if err != nil {
-					fmt.Println(err)
-				}
-				// 클라이언트에게 액세스 토큰 재전송
-				rd.JSON(w, http.StatusOK, td.AccessToken)
-			} else {
-				rd.JSON(w, http.StatusOK, "interner server error: email and emailFromRedis is not same")
-
-			}
-
-		}
+		// 리프레쉬 토큰 요청
+		rd.JSON(w, http.StatusOK, "expired")
 
 	} else {
 		// 액세스 토큰이 유효한 경우
 		rd.JSON(w, http.StatusOK, "good")
+	}
+}
+
+func refreshAuth(w http.ResponseWriter, r *http.Request) {
+	cors(w)
+	err := TokenValid(r.FormValue("refresh_token"), r, "refresh")
+	if err != nil {
+		// 리프레쉬 토큰도 만료된 경우 -> 재 로그인 필요
+		fmt.Println(err)
+		rd.JSON(w, http.StatusOK, "you need to login")
+	} else {
+		// 리프레쉬 토큰은 살아있는 경우 -> 액세스 토큰 재발급
+		fmt.Println("액세스 토큰이 재발급 됩니다.")
+		// 리프레쉬 토큰에서 이메일 및 uuid 추출
+		ad, err := ExtractTokenMetadata(r.FormValue("refresh_token"), r, "refresh")
+		if err != nil {
+			fmt.Println(err)
+		}
+		// 추출된 uuid로 redis에서 이메일 가져와서 토큰의 이메일과 비교
+		emailFromRedis, err := FetchAuth(ad)
+		if err != nil {
+			fmt.Println(err)
+		}
+
+		if ad.email == emailFromRedis {
+			// 같다면 액세스 토큰 재발급
+			td, err := CreatAccessToken(emailFromRedis)
+			if err != nil {
+				fmt.Println(err)
+			}
+			// 액세스 토큰 redis에 저장
+			err = SaveAccessToken(emailFromRedis, td)
+			if err != nil {
+				fmt.Println(err)
+			}
+			// 클라이언트에게 액세스 토큰 재전송
+			rd.JSON(w, http.StatusOK, td.AccessToken)
+		} else {
+			rd.JSON(w, http.StatusOK, "interner server error: email and emailFromRedis is not same")
+
+		}
+
 	}
 }
 
@@ -433,7 +437,8 @@ func main() {
 	mux.Post("/login", login)
 	mux.Post("/logout", logout)
 	// 토큰 검증 및 재발급을 위한 api
-	mux.Post("/user_auth", userAuth)
+	mux.Post("/access_auth", accessAuth)
+	mux.Post("/refresh_auth", refreshAuth)
 	mux.Post("/user_info", userInfo)
 
 	http.ListenAndServe(":3001", n)
