@@ -3,15 +3,22 @@ package main
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
+	"net/smtp"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"database/sql"
 
 	"github.com/dgrijalva/jwt-go"
 	_ "github.com/dgrijalva/jwt-go"
-	"github.com/go-redis/redis"
+
+	"context"
+
+	"github.com/go-redis/redis/v8"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/pat"
 	"github.com/joho/godotenv"
@@ -25,6 +32,8 @@ var rd *render.Render
 var db *sql.DB
 
 var client *redis.Client
+
+var ctx = context.Background()
 
 type TokenDetails struct {
 	AccessToken  string
@@ -51,7 +60,7 @@ func init() {
 		Addr:     dsn,
 		Password: os.Getenv("REDIS_PASSWORD"),
 	})
-	_, err = client.Ping().Result()
+	_, err = client.Ping(ctx).Result()
 	if err != nil {
 		panic(err)
 	}
@@ -73,6 +82,11 @@ func makeUser(w http.ResponseWriter, r *http.Request) {
 	var name = r.FormValue("name")
 	var email = r.FormValue("email")
 	var password = r.FormValue("password")
+	var rrn1 = r.FormValue("rrn1")
+	var rrn2 = r.FormValue("rrn2")
+
+	fmt.Println(rrn1)
+	fmt.Println(rrn2)
 
 	var emailInDB string
 
@@ -81,7 +95,7 @@ func makeUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 
 		if err == sql.ErrNoRows {
-			err := db.QueryRow("insert into UserInfo(name, email, password) values(?, ?, ?)", name, email, password)
+			err := db.QueryRow("insert into UserInfo(name, email, password, rrn1, rrn2) values(?, ?, ?, ?, ?)", name, email, password, rrn1, rrn2)
 			if err != nil {
 				fmt.Println(err)
 			}
@@ -178,11 +192,11 @@ func CreateAuth(email string, td *TokenDetails) error {
 	rt := time.Unix(td.RtExpires, 0)
 	now := time.Now()
 
-	errAccess := client.Set(td.AccessUuid, email, at.Sub(now)).Err()
+	errAccess := client.Set(ctx, td.AccessUuid, email, at.Sub(now)).Err()
 	if errAccess != nil {
 		return errAccess
 	}
-	errRefresh := client.Set(td.RefreshUuid, email, rt.Sub(now)).Err()
+	errRefresh := client.Set(ctx, td.RefreshUuid, email, rt.Sub(now)).Err()
 	if errRefresh != nil {
 		return errRefresh
 	}
@@ -275,7 +289,7 @@ func SaveAccessToken(email string, td *TokenDetails) error {
 	at := time.Unix(td.AtExpires, 0) //converting Unix to UTC
 	now := time.Now()
 
-	errAccess := client.Set(td.AccessUuid, email, at.Sub(now)).Err()
+	errAccess := client.Set(ctx, td.AccessUuid, email, at.Sub(now)).Err()
 	if errAccess != nil {
 		return errAccess
 	}
@@ -359,7 +373,7 @@ func ExtractTokenMetadata(tokenString string, r *http.Request, tokenKind string)
 
 // 토큰에 저장된 uuid를 Redis에서 찾기
 func FetchAuth(authD *AccessDetails) (string, error) {
-	email, err := client.Get(authD.uuid).Result()
+	email, err := client.Get(ctx, authD.uuid).Result()
 	if err != nil {
 		return "", err
 	}
@@ -377,20 +391,21 @@ func userInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var name string
+	var rrn1 string
 
 	// DB에 해당 계정이 없다면 유저 생성
-	err = db.QueryRow("select name from UserInfo where email = ?", ad.email).Scan(&name)
+	err = db.QueryRow("select name, rrn1 from UserInfo where email = ?", ad.email).Scan(&name, &rrn1)
 	if err != nil {
 		fmt.Println(err)
 	}
 
-	user := map[string]string{"email": ad.email, "name": name}
+	user := map[string]string{"email": ad.email, "name": name, "rrn1": rrn1}
 
 	rd.JSON(w, http.StatusOK, user)
 }
 
 func DeleteAuth(givenUuid string) (int64, error) {
-	deleted, err := client.Del(givenUuid).Result()
+	deleted, err := client.Del(ctx, givenUuid).Result()
 	if err != nil {
 		return 0, err
 	}
@@ -413,6 +428,153 @@ func logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rd.JSON(w, http.StatusOK, "로그아웃 성공")
+}
+
+func getEmail(w http.ResponseWriter, r *http.Request) {
+	cors(w)
+	name := r.FormValue("name")
+	rrn1 := r.FormValue("rrn1")
+	rrn2 := r.FormValue("rrn2")
+
+	var email string
+
+	err := db.QueryRow("select email from UserInfo where name = ? and rrn1 = ? and rrn2 = ?", name, rrn1, rrn2).Scan(&email)
+	if err != nil {
+		fmt.Println(err)
+		// 해당 이메일이 없다면 오류 전송
+		rd.JSON(w, http.StatusBadRequest, "no email")
+	} else {
+		// 해당 이메일이 있다면 그대로 전송
+		fmt.Println("get email")
+		rd.JSON(w, http.StatusOK, email)
+	}
+
+}
+
+const (
+	// Gmail SMTP Server
+	GoogleSMTPServer = "smtp.gmail.com"
+)
+
+type smtpSender struct {
+	senderEmail string
+	password    string
+}
+
+func NewSender(senderEmail string, password string) smtpSender {
+	return smtpSender{senderEmail: senderEmail, password: password}
+}
+
+func (sender *smtpSender) SendMail(Dest []string, Subject string, Message string) error {
+	msg := "From: " + sender.senderEmail + "\n" +
+		"To: " + strings.Join(Dest, ",") + "\n" +
+		"Subject: " + Subject + "\n" + Message
+
+	err := smtp.SendMail(GoogleSMTPServer+":587",
+		smtp.PlainAuth("", sender.senderEmail, sender.password, GoogleSMTPServer),
+		sender.senderEmail, Dest, []byte(msg))
+
+	if err != nil {
+		fmt.Printf("smtp error: %s", err)
+		return err
+	}
+
+	fmt.Println("Mail sent successfully!")
+	return nil
+}
+
+var code int
+
+func sendEmailToUser(w http.ResponseWriter, r *http.Request) {
+	cors(w)
+
+	senderEmail := os.Getenv("SENDER_EMAIL")
+	password := os.Getenv("SENDER_PASSWORD")
+
+	email := r.FormValue("email")
+	rrn1 := r.FormValue("rrn1")
+	rrn2 := r.FormValue("rrn2")
+
+	var rrn1FromDB string
+	var rrn2FromDB string
+
+	// 데이터베이스에서 해당 이메일에 대한 주민등록번호가 일치하면 해당 이메일로 인증코드를 전송한다.
+	err := db.QueryRow("select rrn1, rrn2 from UserInfo where email = ?", email).Scan(&rrn1FromDB, &rrn2FromDB)
+	if err != nil {
+		fmt.Println(err)
+		rd.JSON(w, http.StatusBadRequest, "존재하지 않은 이메일입니다.")
+	} else {
+		if rrn1FromDB == rrn1 && rrn2FromDB == rrn2 {
+			// 일치할 때 -> 인증코드 전송
+
+			// 난수코드 생성해서 제한시간 3분으로 레디스에 저장
+			code = rand.Intn(1000000)
+			// 이메일을 키로해서 저장
+			errAccess := client.Set(ctx, email, code, time.Unix(time.Now().Add(time.Minute*2).Unix(), 0).Sub(time.Now())).Err()
+			if errAccess != nil {
+				fmt.Println(errAccess)
+			}
+
+			//난수코드를 메일로 전송
+			receiver := []string{email}
+			subject := "OPENIT 인증코드"
+			message := code
+
+			smtpSender := NewSender(senderEmail, password)
+			if err := smtpSender.SendMail(receiver, subject, strconv.Itoa(message)); err != nil {
+				fmt.Println("smtp send error: ", err)
+				rd.JSON(w, http.StatusInternalServerError, "메일을 발송하는 데 오류가 발생하였습니다.")
+			} else {
+				fmt.Println("smtp send ok")
+				rd.JSON(w, http.StatusOK, "해당 메일로 인증코드가 전송되었습니다.")
+			}
+		} else {
+			rd.JSON(w, http.StatusBadRequest, "주민등록번호가 일치하지 않습니다. ")
+		}
+	}
+
+}
+
+func verifyCode(w http.ResponseWriter, r *http.Request) {
+	cors(w)
+
+	code := r.FormValue("code")
+	email := r.FormValue("email")
+	fmt.Println(email)
+
+	codeFromRedis, err := client.Get(ctx, email).Result()
+	if err != nil {
+		// 인증코드가 만료된 경우
+		fmt.Println(err)
+		rd.JSON(w, http.StatusBadRequest, "인증코드가 만료되었습니다.")
+	} else {
+		// 클라이언트가 입력한 인증코드와 redis의 인증코드가 일치하는지 확인
+		if code == codeFromRedis {
+			// 일치
+			rd.JSON(w, http.StatusOK, "인증코드가 일치합니다.")
+		} else {
+			// 다를 때
+			rd.JSON(w, http.StatusBadRequest, "인증코드가 일치하지 않습니다.")
+		}
+	}
+
+}
+
+func setPassword(w http.ResponseWriter, r *http.Request) {
+	cors(w)
+
+	password := r.FormValue("password")
+	email := r.FormValue("email")
+
+	fmt.Println(password, email)
+
+	err := db.QueryRow("update UserInfo set password = ? where email = ?", password, email).Err()
+	if err != nil {
+		fmt.Println(err)
+		rd.JSON(w, http.StatusInternalServerError, "서버 내부 에러로 비밀번호를 재설정할 수 없습니다.")
+	} else {
+		rd.JSON(w, http.StatusOK, "비밀번호가 변경되었습니다.")
+	}
 }
 
 func main() {
@@ -440,6 +602,11 @@ func main() {
 	mux.Post("/access_auth", accessAuth)
 	mux.Post("/refresh_auth", refreshAuth)
 	mux.Post("/user_info", userInfo)
+
+	mux.Post("/get_email", getEmail)
+	mux.Post("/send_email_to_user", sendEmailToUser)
+	mux.Post("/verify_code", verifyCode)
+	mux.Post("/set_password", setPassword)
 
 	http.ListenAndServe(":3001", n)
 }
