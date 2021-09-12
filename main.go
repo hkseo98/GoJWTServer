@@ -115,9 +115,10 @@ func login(w http.ResponseWriter, r *http.Request) {
 
 	var emailInDB string
 	var passwordInDB string
+	var name string
 
 	// DB에 해당 계정이 없다면 유저 생성
-	err := db.QueryRow("select email, password from UserInfo where email = ?", email).Scan(&emailInDB, &passwordInDB)
+	err := db.QueryRow("select email, password, name from UserInfo where email = ?", email).Scan(&emailInDB, &passwordInDB, &name)
 	if err != nil {
 		// DB에 해당 이메일이 없으면 클라이언트에게 해당 이메일이 존재하지 않음을 알림
 		if err == sql.ErrNoRows {
@@ -142,6 +143,7 @@ func login(w http.ResponseWriter, r *http.Request) {
 			tokens := map[string]string{
 				"access_token":  token.AccessToken,
 				"refresh_token": token.RefreshToken,
+				"name":          name,
 			}
 			rd.JSON(w, http.StatusOK, tokens)
 		} else {
@@ -590,7 +592,7 @@ func main() {
 	n.UseHandler(mux)
 
 	// mysql 연결
-	db, _ = sql.Open("mysql", "root:Digital73@@tcp(127.0.0.1:3306)/User")
+	db, _ = sql.Open("mysql", os.Getenv("MYSQL"))
 
 	defer db.Close()
 
