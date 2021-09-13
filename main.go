@@ -504,7 +504,7 @@ func sendEmailToUser(w http.ResponseWriter, r *http.Request) {
 	err := db.QueryRow("select rrn1, rrn2 from UserInfo where email = ?", email).Scan(&rrn1FromDB, &rrn2FromDB)
 	if err != nil {
 		fmt.Println(err)
-		rd.JSON(w, http.StatusBadRequest, "존재하지 않은 이메일입니다.")
+		rd.JSON(w, http.StatusBadRequest, "존재하지 않는 이메일입니다.")
 	} else {
 		if rrn1FromDB == rrn1 && rrn2FromDB == rrn2 {
 			// 일치할 때 -> 인증코드 전송
@@ -512,7 +512,8 @@ func sendEmailToUser(w http.ResponseWriter, r *http.Request) {
 			// 난수코드 생성해서 제한시간 3분으로 레디스에 저장
 			code = rand.Intn(1000000)
 			// 이메일을 키로해서 저장
-			errAccess := client.Set(ctx, email, code, time.Unix(time.Now().Add(time.Minute*2).Unix(), 0).Sub(time.Now())).Err()
+			errAccess := client.Set(ctx, email, code, time.Unix(time.Now().
+				Add(time.Minute*2).Unix(), 0).Sub(time.Now())).Err()
 			if errAccess != nil {
 				fmt.Println(errAccess)
 			}
